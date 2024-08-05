@@ -1,5 +1,7 @@
 # Encryption Oracle
 
+Swagger available at `http://localhost:3000/swagger/`
+
 ## Run dockerized
 
 ```bash

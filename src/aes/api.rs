@@ -8,25 +8,22 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use utoipa::{IntoParams, OpenApi, ToSchema};
 
 use super::super::{
     aes,
-    api::{serde_base64, serde_base64_opt},
+    api::helper::{serde_base64, serde_base64_opt},
 };
 
 #[derive(Error, Debug)]
 enum AppError {
     #[error("aes oracle error: {0:?}")]
     AesError(#[from] aes::AesError),
-
-    #[error("invalid parameter: {0}")]
-    InvalidParameter(String),
 }
 impl AppError {
     fn status_code(&self) -> StatusCode {
         match self {
             Self::AesError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::InvalidParameter(_) => StatusCode::UNPROCESSABLE_ENTITY,
         }
     }
 }
@@ -36,12 +33,22 @@ impl IntoResponse for AppError {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
+enum AesBits {
+    #[serde(rename = "128")]
+    Aes128,
+    #[serde(rename = "192")]
+    Aes192,
+    #[serde(rename = "256")]
+    Aes256,
+}
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct AesConfig {
-    bits: Option<usize>,
+    bits: AesBits,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct EncryptRequest {
     #[serde(with = "serde_base64")]
     msg: Vec<u8>,
@@ -49,7 +56,7 @@ struct EncryptRequest {
     aad: Option<Vec<u8>>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct EncryptResponse {
     #[serde(with = "serde_base64")]
     key: Vec<u8>,
@@ -71,7 +78,7 @@ impl From<aes::EncryptedPayload> for EncryptResponse {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct DecryptRequest {
     #[serde(with = "serde_base64")]
     key: Vec<u8>,
@@ -95,40 +102,69 @@ impl DecryptRequest {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct DecryptResponse {
     #[serde(with = "serde_base64")]
     msg: Vec<u8>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/encrypt",
+    request_body = EncryptRequest,
+    params(AesConfig),
+    responses(
+        (status = 200, body = EncryptResponse)
+    )
+)]
 async fn encrypt(
     aes_config: Query<AesConfig>,
     Json(req): Json<EncryptRequest>,
 ) -> Result<Json<EncryptResponse>> {
     let res: EncryptResponse = (match aes_config.bits {
-        Some(128) => aes::encrypt_aes_128_gcm,
-        Some(192) => aes::encrypt_aes_192_gcm,
-        Some(256) | None => aes::encrypt_aes_256_gcm,
-        Some(_) => return Err(AppError::InvalidParameter("aes_config.bits".to_string()).into()),
+        AesBits::Aes128 => aes::encrypt_aes_128_gcm,
+        AesBits::Aes192 => aes::encrypt_aes_192_gcm,
+        AesBits::Aes256 => aes::encrypt_aes_256_gcm,
     })(&req.msg, req.aad.as_ref())
     .map_err(AppError::AesError)?
     .into();
     Ok(Json(res))
 }
 
+#[utoipa::path(
+    post,
+    path = "/decrypt",
+    request_body = DecryptRequest,
+    params(AesConfig),
+    responses(
+        (status = 200, body = DecryptResponse)
+    )
+)]
 async fn decrypt(
     aes_config: Query<AesConfig>,
     Json(req): Json<DecryptRequest>,
 ) -> Result<Json<DecryptResponse>> {
     let msg = (match aes_config.bits {
-        Some(128) => aes::decrypt_aes_128_gcm,
-        Some(192) => aes::decrypt_aes_192_gcm,
-        Some(256) | None => aes::decrypt_aes_256_gcm,
-        Some(_) => return Err(AppError::InvalidParameter("aes_config.bits".to_string()).into()),
+        AesBits::Aes128 => aes::decrypt_aes_128_gcm,
+        AesBits::Aes192 => aes::decrypt_aes_192_gcm,
+        AesBits::Aes256 => aes::decrypt_aes_256_gcm,
     })(&req.payload(), req.aad.as_ref())
     .map_err(AppError::AesError)?;
     Ok(Json(DecryptResponse { msg }))
 }
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(encrypt, decrypt),
+    components(schemas(
+        AesBits,
+        EncryptRequest,
+        EncryptResponse,
+        DecryptRequest,
+        DecryptResponse
+    ))
+)]
+pub struct ApiDoc;
 
 pub fn router() -> Router {
     Router::new()
@@ -249,11 +285,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let body = String::from_utf8(body[..].to_vec()).unwrap();
-        assert!(body.contains("bits"));
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
